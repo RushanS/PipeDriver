@@ -5,18 +5,20 @@
 #include <linux/fs.h>
 
 #define DEVICE_NAME "mypipe"
-#define MAJOR_NUMBER 333
-#define BUFFER_SIZE 10000
+#define BUFFER_SIZE 16
+#define BUFFER_MASK (BUFFER_SIZE-1)
 
-static int major_number;
+
 static int mypipe_open(struct inode *, struct file *);
 static int mypipe_release(struct inode *, struct file *);
 static ssize_t mypipe_read(struct file *, char __user *, size_t, loff_t *);
 static ssize_t mypipe_write (struct file *, const char __user *, size_t, loff_t *);
 
+
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("My Pipe module");
 MODULE_AUTHOR("Rushan");
+
 
 static struct file_operations fops = 
 {
@@ -26,7 +28,14 @@ static struct file_operations fops =
 	.write = mypipe_write
 };
 
-char buffer[BUFFER_SIZE];
+static int major_number;
+static wait_queue_head_t queue_read;
+static wait_queue_head_t queue_write;
+static char buffer[BUFFER_SIZE];
+static int bytes_in_buffer = 0;
+static ssize_t need_write_to_buffer = 0;
+int idxIN = 1;
+int idxOUT = 0;
 
 static int mypipe_open(struct inode *i, struct file *f)
 {
@@ -42,31 +51,70 @@ static int mypipe_release(struct inode *i, struct file *f)
 
 static ssize_t mypipe_read(struct file *f, char __user *dst, size_t size, loff_t * l)
 {
-	memcpy(dst, buffer, size);
-	printk(KERN_INFO "read %d bytes", size);
-	return size;
+	int total_read = 0;
+	int indexOutFile = 0;
+	int i;
+	do {
+	
+		if (bytes_in_buffer == 0 && need_write_to_buffer > 0) {
+			printk(KERN_INFO "before wake up 1");
+			wake_up_interruptible(&queue_write); // будим пишуший поток
+			printk(KERN_INFO "before sleep 1");
+			wait_event_interruptible(queue_read, bytes_in_buffer > 0); // читающий поток засыпает
+		}
+	
+		for (i = 0; i < bytes_in_buffer; i++) {
+			printk(KERN_INFO "read byte: %d", buffer[idxOUT] - '0');
+			dst[indexOutFile++] = buffer[idxOUT++];
+			idxOUT &= BUFFER_MASK;
+			total_read++;
+			bytes_in_buffer--;
+		
+			printk(KERN_INFO "idxIN: %d; idxOUT: %d; i: %d; bytes_in_buffer: %d; need_write_to_buffer: %d; size: %d", 
+				idxIN, idxOUT, i, bytes_in_buffer, need_write_to_buffer, size);
+
+		}
+	
+	printk(KERN_INFO "read %d bytes to mypipe", total_read);
+//	wake_up_interruptible(&queue_write); // будим пишуший поток
+//	wait_event_interruptible(queue_read, idxIN != idxOUT); // читающий поток засыпает
+	} while (need_write_to_buffer > 0);
+	
+	return total_read;
 }
 
 static ssize_t mypipe_write (struct file *f, const char __user *src, size_t size, loff_t *l)
 {
-	if (size > BUFFER_SIZE) {
-		memcpy(buffer, src, BUFFER_SIZE);
+	int total_written = 0;
+	int i;
+	need_write_to_buffer = size;
+	for (i = 0; i < size;) {
+		if (idxIN == idxOUT && need_write_to_buffer > 0) {
+			wake_up_interruptible(&queue_read); // будим читающий поток
+			wait_event_interruptible(queue_write, idxIN != idxOUT); // пишущий поток засыпает
+		}
+		printk(KERN_INFO "1) idxIN = %d, idxOUT = %d", idxIN, idxOUT);
+		buffer[idxIN++] = src[i++];
+		total_written++;
+		bytes_in_buffer++;
+		need_write_to_buffer--;
+		idxIN &= BUFFER_MASK;
+		printk(KERN_INFO "2) idxIN = %d, idxOUT = %d", idxIN, idxOUT);
 	}
-	else {
-		memcpy(buffer, src, size);
-	}
-	printk(KERN_INFO "write %d bytes", size);
-	return size;
+	printk(KERN_INFO "written %d bytes", total_written);
+	wake_up_interruptible(&queue_read); // будим читающий поток
+	return total_written;
 }
-
 
 static char *param = "world";
 module_param(param, charp, 0);
 
 static int __init mypipe_init(void)
 {
-	major_number = register_chrdev(333, DEVICE_NAME, &fops);
+	major_number = register_chrdev(321, DEVICE_NAME, &fops);
 	pr_alert("init module mypipe\n");
+	init_waitqueue_head(&queue_read);
+	init_waitqueue_head(&queue_write);
 	return 0;
 }
 
