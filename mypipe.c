@@ -34,7 +34,7 @@ static wait_queue_head_t queue_write;
 static char buffer[BUFFER_SIZE];
 static int bytes_in_buffer = 0;
 static ssize_t need_write_to_buffer = 0;
-int idxIN = 1;
+int idxIN = 0;
 int idxOUT = 0;
 
 static int mypipe_open(struct inode *i, struct file *f)
@@ -64,7 +64,7 @@ static ssize_t mypipe_read(struct file *f, char __user *dst, size_t size, loff_t
 		}
 	
 		for (i = 0; i < bytes_in_buffer; i++) {
-			printk(KERN_INFO "read byte: %d", buffer[idxOUT] - '0');
+			printk(KERN_INFO "read byte: %d", buffer[idxOUT]);
 			dst[indexOutFile++] = buffer[idxOUT++];
 			idxOUT &= BUFFER_MASK;
 			total_read++;
@@ -89,10 +89,6 @@ static ssize_t mypipe_write (struct file *f, const char __user *src, size_t size
 	int i;
 	need_write_to_buffer = size;
 	for (i = 0; i < size;) {
-		if (idxIN == idxOUT && need_write_to_buffer > 0) {
-			wake_up_interruptible(&queue_read); // будим читающий поток
-			wait_event_interruptible(queue_write, idxIN != idxOUT); // пишущий поток засыпает
-		}
 		printk(KERN_INFO "1) idxIN = %d, idxOUT = %d", idxIN, idxOUT);
 		buffer[idxIN++] = src[i++];
 		total_written++;
@@ -100,6 +96,11 @@ static ssize_t mypipe_write (struct file *f, const char __user *src, size_t size
 		need_write_to_buffer--;
 		idxIN &= BUFFER_MASK;
 		printk(KERN_INFO "2) idxIN = %d, idxOUT = %d", idxIN, idxOUT);
+		
+		if (idxIN == idxOUT && need_write_to_buffer > 0) {
+			wake_up_interruptible(&queue_read); // будим читающий поток
+			wait_event_interruptible(queue_write, bytes_in_buffer == 0); // пишущий поток засыпает
+		}
 	}
 	printk(KERN_INFO "written %d bytes", total_written);
 	wake_up_interruptible(&queue_read); // будим читающий поток
